@@ -1,0 +1,83 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Prepare jniLibs + assets
+        env:
+          SINGBOX_URL: ${{ vars.SINGBOX_URL }}
+          HEV_JNI_URL: ${{ vars.HEV_JNI_URL }}
+        run: |
+          set -euo pipefail
+          JNI=app/src/main/jniLibs/arm64-v8a
+          ASSETS=app/src/main/assets
+          mkdir -p "$JNI" "$ASSETS"
+
+          if [ -f "$JNI/libsingbox.so" ]; then
+            echo "libsingbox.so present (LFS or commit)"
+          elif [ -n "${SINGBOX_URL:-}" ]; then
+            echo "Downloading libsingbox.so from SINGBOX_URL"
+            curl -fL --retry 3 -o "$JNI/libsingbox.so" "$SINGBOX_URL"
+          else
+            echo "::warning::No libsingbox.so — APK will be SAFE MODE without core"
+          fi
+
+          if [ -f "$JNI/libhev-jni.so" ]; then
+            echo "libhev-jni.so present"
+          elif [ -n "${HEV_JNI_URL:-}" ]; then
+            curl -fL --retry 3 -o "$JNI/libhev-jni.so" "$HEV_JNI_URL"
+          else
+            echo "Fetching hev CLI arm64 as fallback"
+            curl -fL --retry 3 -o "$JNI/libhev-socks5-tunnel.so" \
+              "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.17.0/hev-socks5-tunnel-android-arm64-v8a" \
+              || echo "WARN: hev download failed"
+          fi
+
+          if [ ! -f "$ASSETS/geoip.db" ]; then
+            curl -fL --retry 3 -o "$ASSETS/geoip.db" \
+              "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db" || true
+          fi
+          if [ ! -f "$ASSETS/geosite.db" ]; then
+            curl -fL --retry 3 -o "$ASSETS/geosite.db" \
+              "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" || true
+          fi
+
+          ls -lh "$JNI" "$ASSETS" || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClearPass-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

@@ -1,0 +1,19 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.ap_
+*.dex
+
+# Native cores (size/license) — use LFS or CI download
+app/src/main/jniLibs/**/*.so
+
+# Large geo can be fetched in CI
+# app/src/main/assets/*.db
