@@ -25,8 +25,29 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Bootstrap Gradle Wrapper
+        run: |
+          set -euo pipefail
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          # Official wrapper jar from Gradle v8.5.0 tag
+          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar"
+          # Minimal gradlew if missing/broken
+          if [ ! -s gradlew ] || [ "$(wc -c < gradlew)" -lt 100 ]; then
+            curl -fsSL -o gradlew \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradlew"
+          fi
+          chmod +x gradlew
+          ls -lh gradlew gradle/wrapper/
 
       - name: Prepare jniLibs + assets
         env:
@@ -44,7 +65,7 @@ jobs:
             echo "Downloading libsingbox.so from SINGBOX_URL"
             curl -fL --retry 3 -o "$JNI/libsingbox.so" "$SINGBOX_URL"
           else
-            echo "::warning::No libsingbox.so — APK will be SAFE MODE without core"
+            echo "::warning::No libsingbox.so — APK builds in SAFE MODE (no VPN core)"
           fi
 
           if [ -f "$JNI/libhev-jni.so" ]; then
@@ -52,7 +73,7 @@ jobs:
           elif [ -n "${HEV_JNI_URL:-}" ]; then
             curl -fL --retry 3 -o "$JNI/libhev-jni.so" "$HEV_JNI_URL"
           else
-            echo "Fetching hev CLI arm64 as fallback"
+            echo "Fetching hev CLI arm64 fallback"
             curl -fL --retry 3 -o "$JNI/libhev-socks5-tunnel.so" \
               "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.17.0/hev-socks5-tunnel-android-arm64-v8a" \
               || echo "WARN: hev download failed"
@@ -67,6 +88,8 @@ jobs:
               "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" || true
           fi
 
+          # Ensure empty assets dir is valid
+          touch "$ASSETS/.gitkeep"
           ls -lh "$JNI" "$ASSETS" || true
 
       - name: Setup Gradle
