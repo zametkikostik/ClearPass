@@ -1,19 +1,14 @@
-# Upload status (parts)
+# Upload status
 
-## Done
-- Gradle skeleton, workflow build.yml
-- ClearPassApp, HevJni, ConnectionState, CoreBootstrap, CoreProbe
-- SafeSources + SourceFetcher (igareck + backups)
-- Data stores: Manual, Settings, Subscription, AppDatabase
-- LogCollector, HealthMonitor, OsintScraper, ConfigTester
-- Manifest, res, docs
+## Done (source)
+- Full app modules: VPN, CM, converter, sources, data, UI MainActivity
+- Workers, theme, widget, docs, scripts/fetch_geo.sh
+- GitHub Actions build.yml
 
-## Next parts
-- ConfigCacheStore, ProxyLinkParser, WhiteListManager
-- SingBoxConverter, Tun2SocksBridge
-- ClearPassVpnService, ConnectionManager
-- MainActivity, workers, widget
-- real gradlew + wrapper.jar
-- libsingbox.so via LFS/Release
+## Still optional / local
+- `gradlew` real script + `gradle-wrapper.jar` (regenerate: `gradle wrapper`)
+- `libsingbox.so` / `libhev-jni.so` via LFS or Release (see RELEASE_BINARIES.md)
+- BackupManager / Profiles/History screens (trimmed in MainActivity push)
+- Local assembleDebug verification
 
-Continue with agent: «дальше»
+Repo: https://github.com/zametkikostik/ClearPass
