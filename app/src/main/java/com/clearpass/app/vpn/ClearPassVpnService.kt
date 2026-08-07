@@ -13,9 +13,16 @@ import com.clearpass.app.MainActivity
 import com.clearpass.app.core.CoreBootstrap
 import com.clearpass.app.tunnel.Tun2SocksBridge
 import com.clearpass.app.util.LogCollector
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.coroutines.coroutineContext
 
 class ClearPassVpnService : VpnService() {
 
@@ -147,7 +154,7 @@ class ClearPassVpnService : VpnService() {
 
     private suspend fun watchCore() {
         val p = coreProcess ?: return
-        while (isActive && !userStop) {
+        while (coroutineContext.isActive && !userStop) {
             delay(1500)
             try {
                 p.exitValue()
@@ -163,6 +170,7 @@ class ClearPassVpnService : VpnService() {
                 }
                 break
             } catch (_: IllegalThreadStateException) {
+                // still running
             } catch (_: Exception) {
                 break
             }
