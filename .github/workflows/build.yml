@@ -50,7 +50,6 @@ jobs:
               "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradlew"
           fi
           chmod +x gradlew
-          ls -lh gradlew gradle/wrapper/
 
       - name: Prepare jniLibs + assets
         env:
@@ -67,7 +66,10 @@ jobs:
           elif [ -n "${SINGBOX_URL:-}" ]; then
             curl -fL --retry 3 -o "$JNI/libsingbox.so" "$SINGBOX_URL"
           else
-            echo "::warning::No libsingbox.so — SAFE MODE APK"
+            # Fallback: try latest release asset if user uploaded it
+            curl -fL --retry 2 -o "$JNI/libsingbox.so" \
+              "https://github.com/zametkikostik/ClearPass/releases/download/v0.2.1/libsingbox.so" \
+              || echo "::warning::No libsingbox.so — SAFE MODE"
           fi
 
           if [ -f "$JNI/libhev-jni.so" ]; then
@@ -77,52 +79,51 @@ jobs:
           else
             curl -fL --retry 3 -o "$JNI/libhev-socks5-tunnel.so" \
               "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.17.0/hev-socks5-tunnel-android-arm64-v8a" \
-              || echo "WARN: hev download failed"
+              || true
           fi
 
-          if [ ! -f "$ASSETS/geoip.db" ]; then
-            curl -fL --retry 3 -o "$ASSETS/geoip.db" \
-              "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db" || true
-          fi
-          if [ ! -f "$ASSETS/geosite.db" ]; then
-            curl -fL --retry 3 -o "$ASSETS/geosite.db" \
-              "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" || true
-          fi
+          curl -fL --retry 2 -o "$ASSETS/geoip.db" \
+            "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db" || true
+          curl -fL --retry 2 -o "$ASSETS/geosite.db" \
+            "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" || true
           touch "$ASSETS/.gitkeep"
           ls -lh "$JNI" "$ASSETS" || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+      - name: Build Debug + Release APK
+        run: ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
 
-      - name: Rename APK
+      - name: Package dist/
         run: |
           set -euo pipefail
           mkdir -p dist
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
-          cp "$APK" dist/ClearPass-debug.apk
-          sha256sum dist/ClearPass-debug.apk | tee dist/ClearPass-debug.apk.sha256
+          DEBUG_APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          RELEASE_APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          cp "$DEBUG_APK" dist/ClearPass-debug.apk
+          cp "$RELEASE_APK" dist/ClearPass-release.apk
+          sha256sum dist/*.apk | tee dist/checksums.sha256
           ls -lh dist/
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ClearPass-debug
+          name: ClearPass-APKs
           path: |
             dist/ClearPass-debug.apk
-            dist/ClearPass-debug.apk.sha256
+            dist/ClearPass-release.apk
+            dist/checksums.sha256
           if-no-files-found: error
 
-      # Attach APK to existing / new GitHub Release (tag v* or release event)
-      - name: Upload APK to GitHub Release
+      - name: Upload APKs to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/ClearPass-debug.apk
-            dist/ClearPass-debug.apk.sha256
+            dist/ClearPass-release.apk
+            dist/checksums.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
         env:
