@@ -1,19 +1,27 @@
-*.iml
+```
+# Dependencies
 .gradle/
-/local.properties
-/.idea/
-.DS_Store
-/build
-/app/build
-/captures
-.externalNativeBuild
-.cxx
-*.apk
-*.ap_
-*.dex
+build/
 
-# Native cores (size/license) — use LFS or CI download
-app/src/main/jniLibs/**/*.so
+# Environment
+.env
+.env.local
+*.env.*
 
-# Large geo can be fetched in CI
-# app/src/main/assets/*.db
+# Logs and temp files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+.idea/
+
+# Compiled and build artifacts
+*.class
+*.jar
+*.war
+*.aar
+*.so
+*.dylib
+*.dll
+```
