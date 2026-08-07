@@ -57,6 +57,15 @@ class ConnectionManager(private val context: Context) {
                 _state.value = ConnectionState.Connecting
                 CoreBootstrap.prepare(context)
 
+                // Download official sing-box if not packaged in APK
+                val coreOk = withContext(Dispatchers.IO) { CoreBootstrap.ensureCore(context) }
+                if (!coreOk) {
+                    _state.value = ConnectionState.Error(
+                        "Нет ядра sing-box. Нужен интернет для первой загрузки (~18 МБ)."
+                    )
+                    return@launch
+                }
+
                 val prepare = VpnService.prepare(context)
                 if (prepare != null) {
                     LogCollector.i("CM", "VPN permission required")
