@@ -9,12 +9,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.GZIPInputStream
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
-/**
- * Prepares working directory and ensures a runnable sing-box binary exists.
- * Order: packaged jniLibs → filesDir copy → download official android-arm64 tarball.
- */
 object CoreBootstrap {
 
     private const val GEOIP = "geoip.db"
@@ -22,7 +17,6 @@ object CoreBootstrap {
     private const val CORE_NAME = "libsingbox.so"
     private const val CORE_ALT = "sing-box"
 
-    /** Official SagerNet android-arm64 package (contains binary "sing-box"). */
     private const val DEFAULT_CORE_TGZ =
         "https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-android-arm64.tar.gz"
 
@@ -54,7 +48,7 @@ object CoreBootstrap {
         try {
             val bin = resolveBinary(context)
             if (bin == null) {
-                LogCollector.w("Core", "NO BINARY — SAFE MODE (will try download on connect)")
+                LogCollector.w("Core", "NO BINARY — will download on connect")
                 return
             }
             LogCollector.i(
@@ -66,10 +60,6 @@ object CoreBootstrap {
         }
     }
 
-    /**
-     * Blocks until a core binary is available or download fails.
-     * Call from IO dispatcher before starting VPN.
-     */
     fun ensureCore(context: Context): Boolean {
         prepare(context)
         if (resolveBinary(context) != null) return true
@@ -96,13 +86,11 @@ object CoreBootstrap {
                 LogCollector.e("Core", "Downloaded file too small: ${tgz.length()}")
                 return false
             }
-            // Prefer pure GZIP+TAR without external libs — manual extract of "sing-box" entry
             return extractSingBoxFromTarGz(tgz, File(dir, CORE_ALT)).also {
                 try { tgz.delete() } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             LogCollector.e("Core", "extract: ${e.message}")
-            // Fallback: try raw binary URL patterns (user release)
             return tryDownloadPlain(
                 context,
                 listOf(
@@ -151,9 +139,6 @@ object CoreBootstrap {
         }
     }
 
-    /**
-     * Minimal tar.gz reader (ustar) — finds entry named "sing-box" and writes it.
-     */
     private fun extractSingBoxFromTarGz(tgz: File, out: File): Boolean {
         GZIPInputStream(BufferedInputStream(FileInputStream(tgz))).use { gis ->
             val buf = ByteArray(512)
@@ -164,16 +149,19 @@ object CoreBootstrap {
                     if (n < 0) return false
                     read += n
                 }
-                // empty block = end
                 if (buf.all { it.toInt() == 0 }) return false
 
-                val name = buf.copyOfRange(0, 100).toString(Charsets.US_ASCII).trim { it <= ' ' || it == '\u0000' }
-                val sizeOctal = buf.copyOfRange(124, 136).toString(Charsets.US_ASCII).trim { it <= ' ' || it == '\u0000' }
+                val name = buf.copyOfRange(0, 100).toString(Charsets.US_ASCII)
+                    .trim { it <= ' ' || it == '\u0000' }
+                val sizeOctal = buf.copyOfRange(124, 136).toString(Charsets.US_ASCII)
+                    .trim { it <= ' ' || it == '\u0000' }
                 val size = sizeOctal.toLongOrNull(8) ?: 0L
                 val typeFlag = buf[156].toInt().toChar()
 
                 val base = name.substringAfterLast('/')
-                if ((typeFlag == '0' || typeFlag == '\u0000') && (base == "sing-box" || base == CORE_NAME)) {
+                if ((typeFlag == '0' || typeFlag == '\u0000') &&
+                    (base == "sing-box" || base == CORE_NAME)
+                ) {
                     FileOutputStream(out).use { fos ->
                         var left = size
                         val chunk = ByteArray(8192)
@@ -184,20 +172,17 @@ object CoreBootstrap {
                             left -= n
                         }
                     }
-                    // skip padding to 512
                     val pad = ((512 - (size % 512)) % 512).toInt()
                     if (pad > 0) gis.skip(pad.toLong())
                     out.setReadable(true)
                     out.setExecutable(true)
-                    LogCollector.i("Core", "Extracted $base → ${out.absolutePath} (${out.length()} bytes)")
+                    LogCollector.i("Core", "Extracted $base (${out.length()} bytes)")
                     return out.length() > 1_000_000L
                 } else {
-                    // skip file data + padding
                     var left = size
                     while (left > 0) {
                         val sk = gis.skip(left)
                         if (sk <= 0) {
-                            // force read if skip fails
                             if (gis.read() < 0) break
                             left--
                         } else left -= sk
