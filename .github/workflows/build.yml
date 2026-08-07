@@ -3,13 +3,18 @@ name: Build APK
 on:
   push:
     branches: [ main, master ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ main, master ]
+  release:
+    types: [ published ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout (with LFS)
         uses: actions/checkout@v4
@@ -38,10 +43,8 @@ jobs:
           zipStoreBase=GRADLE_USER_HOME
           zipStorePath=wrapper/dists
           EOF
-          # Official wrapper jar from Gradle v8.5.0 tag
           curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
             "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar"
-          # Minimal gradlew if missing/broken
           if [ ! -s gradlew ] || [ "$(wc -c < gradlew)" -lt 100 ]; then
             curl -fsSL -o gradlew \
               "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradlew"
@@ -60,12 +63,11 @@ jobs:
           mkdir -p "$JNI" "$ASSETS"
 
           if [ -f "$JNI/libsingbox.so" ]; then
-            echo "libsingbox.so present (LFS or commit)"
+            echo "libsingbox.so present"
           elif [ -n "${SINGBOX_URL:-}" ]; then
-            echo "Downloading libsingbox.so from SINGBOX_URL"
             curl -fL --retry 3 -o "$JNI/libsingbox.so" "$SINGBOX_URL"
           else
-            echo "::warning::No libsingbox.so — APK builds in SAFE MODE (no VPN core)"
+            echo "::warning::No libsingbox.so — SAFE MODE APK"
           fi
 
           if [ -f "$JNI/libhev-jni.so" ]; then
@@ -73,7 +75,6 @@ jobs:
           elif [ -n "${HEV_JNI_URL:-}" ]; then
             curl -fL --retry 3 -o "$JNI/libhev-jni.so" "$HEV_JNI_URL"
           else
-            echo "Fetching hev CLI arm64 fallback"
             curl -fL --retry 3 -o "$JNI/libhev-socks5-tunnel.so" \
               "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.17.0/hev-socks5-tunnel-android-arm64-v8a" \
               || echo "WARN: hev download failed"
@@ -87,8 +88,6 @@ jobs:
             curl -fL --retry 3 -o "$ASSETS/geosite.db" \
               "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" || true
           fi
-
-          # Ensure empty assets dir is valid
           touch "$ASSETS/.gitkeep"
           ls -lh "$JNI" "$ASSETS" || true
 
@@ -98,9 +97,33 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Upload APK
+      - name: Rename APK
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          cp "$APK" dist/ClearPass-debug.apk
+          sha256sum dist/ClearPass-debug.apk | tee dist/ClearPass-debug.apk.sha256
+          ls -lh dist/
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ClearPass-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            dist/ClearPass-debug.apk
+            dist/ClearPass-debug.apk.sha256
           if-no-files-found: error
+
+      # Attach APK to existing / new GitHub Release (tag v* or release event)
+      - name: Upload APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClearPass-debug.apk
+            dist/ClearPass-debug.apk.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
