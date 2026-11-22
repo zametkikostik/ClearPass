@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        LogCollector.i("Main", "UI ready v0.2.0")
+        LogCollector.i("Main", "UI ready v0.3.0")
     }
 }
 
