@@ -13,6 +13,8 @@ import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.clearpass.app.MainActivity
 import com.clearpass.app.core.CoreBootstrap
+import com.clearpass.app.data.SettingsStore
+import com.clearpass.app.data.SplitTunnelMode
 import com.clearpass.app.tunnel.Tun2SocksBridge
 import com.clearpass.app.util.LogCollector
 import kotlinx.coroutines.CoroutineScope
@@ -98,9 +100,8 @@ class ClearPassVpnService : VpnService() {
                 .setMtu(1500)
                 .setBlocking(true)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
-            }
+            // Split tunneling: применяем режим и список пакетов из настроек
+            applySplitTunneling(builder)
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -162,6 +163,64 @@ class ClearPassVpnService : VpnService() {
             LogCollector.e("VPN", "startTunnel: ${e.message}")
             updateNotif("Error: ${e.message?.take(40)}")
             if (!killSwitch) stopSelf()
+        }
+    }
+
+    /**
+     * Split tunneling: ALL — весь трафик через VPN, INCLUDE — только
+     * выбранные приложения, EXCLUDE — все, кроме выбранных.
+     *
+     * В INCLUDE-режиме нельзя смешивать allow/disallow (Builder бросает
+     * исключение), поэтому себя просто не вносим в allow-список — трафик
+     * приложения останется прямым. В остальных режимах исключаем себя
+     * явно, чтобы не зациклить TUN → sing-box → TUN.
+     */
+    private suspend fun applySplitTunneling(builder: Builder) {
+        val settings = SettingsStore(this)
+        val mode = settings.splitMode()
+        val packages = settings.splitPackages()
+
+        if (mode == SplitTunnelMode.ALL || packages.isEmpty()) {
+            // Пустой список в INCLUDE/EXCLUDE равен режиму «весь трафик»
+            excludeSelf(builder)
+            LogCollector.i("VPN", "Split: ALL traffic")
+            return
+        }
+
+        when (mode) {
+            SplitTunnelMode.INCLUDE -> {
+                var added = 0
+                for (pkg in packages) {
+                    if (pkg == packageName) continue  // себя не заворачиваем
+                    try {
+                        builder.addAllowedApplication(pkg)
+                        added++
+                    } catch (e: Exception) {
+                        LogCollector.w("VPN", "split allow $pkg: ${e.message}")
+                    }
+                }
+                LogCollector.i("VPN", "Split INCLUDE: $added apps via VPN")
+            }
+            SplitTunnelMode.EXCLUDE -> {
+                excludeSelf(builder)
+                var added = 0
+                for (pkg in packages) {
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                        added++
+                    } catch (e: Exception) {
+                        LogCollector.w("VPN", "split disallow $pkg: ${e.message}")
+                    }
+                }
+                LogCollector.i("VPN", "Split EXCLUDE: $added apps bypass VPN")
+            }
+            SplitTunnelMode.ALL -> excludeSelf(builder)
+        }
+    }
+
+    private fun excludeSelf(builder: Builder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
         }
     }
 

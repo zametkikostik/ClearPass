@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -28,6 +29,24 @@ enum class SourceMode {
     }
 }
 
+/**
+ * Режим split tunneling: весь трафик через VPN, только выбранные
+ * приложения или все, кроме выбранных.
+ */
+enum class SplitTunnelMode {
+    ALL,       // весь трафик через VPN (по умолчанию)
+    INCLUDE,   // только выбранные приложения
+    EXCLUDE;   // все, кроме выбранных
+
+    companion object {
+        fun from(raw: String?): SplitTunnelMode = when (raw) {
+            "INCLUDE" -> INCLUDE
+            "EXCLUDE" -> EXCLUDE
+            else -> ALL
+        }
+    }
+}
+
 class SettingsStore(private val context: Context) {
 
     private val KILL_SWITCH = booleanPreferencesKey("kill_switch")
@@ -35,6 +54,8 @@ class SettingsStore(private val context: Context) {
     private val SOURCE_MODE = stringPreferencesKey("source_mode")
     private val AUTO_MODE_ENABLED = booleanPreferencesKey("auto_mode_enabled")
     private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_on_boot")
+    private val SPLIT_MODE = stringPreferencesKey("split_mode")
+    private val SPLIT_PACKAGES = stringSetPreferencesKey("split_packages")
 
     val killSwitchFlow: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
         prefs[KILL_SWITCH] ?: true
@@ -55,6 +76,15 @@ class SettingsStore(private val context: Context) {
     // Автоподключение после загрузки устройства (BootReceiver)
     val autoConnectOnBootFlow: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
         prefs[AUTO_CONNECT_ON_BOOT] ?: false
+    }
+
+    // Split tunneling
+    val splitModeFlow: Flow<SplitTunnelMode> = context.settingsDataStore.data.map { prefs ->
+        SplitTunnelMode.from(prefs[SPLIT_MODE])
+    }
+
+    val splitPackagesFlow: Flow<Set<String>> = context.settingsDataStore.data.map { prefs ->
+        prefs[SPLIT_PACKAGES] ?: emptySet()
     }
 
     suspend fun isKillSwitch(): Boolean = killSwitchFlow.first()
@@ -85,6 +115,20 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setAutoConnectOnBoot(enabled: Boolean) {
         context.settingsDataStore.edit { it[AUTO_CONNECT_ON_BOOT] = enabled }
+    }
+
+    // Split tunneling
+
+    suspend fun splitMode(): SplitTunnelMode = splitModeFlow.first()
+
+    suspend fun setSplitMode(mode: SplitTunnelMode) {
+        context.settingsDataStore.edit { it[SPLIT_MODE] = mode.name }
+    }
+
+    suspend fun splitPackages(): Set<String> = splitPackagesFlow.first()
+
+    suspend fun setSplitPackages(packages: Set<String>) {
+        context.settingsDataStore.edit { it[SPLIT_PACKAGES] = packages }
     }
 
     /**
