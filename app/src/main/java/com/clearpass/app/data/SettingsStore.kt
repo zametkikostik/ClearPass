@@ -34,6 +34,7 @@ class SettingsStore(private val context: Context) {
     private val UPDATE_HOURS = intPreferencesKey("update_hours")
     private val SOURCE_MODE = stringPreferencesKey("source_mode")
     private val AUTO_MODE_ENABLED = booleanPreferencesKey("auto_mode_enabled")
+    private val AUTO_CONNECT_ON_BOOT = booleanPreferencesKey("auto_connect_on_boot")
 
     val killSwitchFlow: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
         prefs[KILL_SWITCH] ?: true
@@ -51,6 +52,11 @@ class SettingsStore(private val context: Context) {
         prefs[AUTO_MODE_ENABLED] ?: false
     }
 
+    // Автоподключение после загрузки устройства (BootReceiver)
+    val autoConnectOnBootFlow: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
+        prefs[AUTO_CONNECT_ON_BOOT] ?: false
+    }
+
     suspend fun isKillSwitch(): Boolean = killSwitchFlow.first()
 
     suspend fun setKillSwitch(enabled: Boolean) {
@@ -66,13 +72,21 @@ class SettingsStore(private val context: Context) {
     suspend fun setSourceMode(mode: SourceMode) {
         context.settingsDataStore.edit { it[SOURCE_MODE] = mode.name }
     }
-    
+
     suspend fun isAutoModeEnabled(): Boolean = autoModeEnabledFlow.first()
-    
+
     suspend fun setAutoModeEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[AUTO_MODE_ENABLED] = enabled }
     }
-    
+
+    // Автоподключение после загрузки устройства
+
+    suspend fun isAutoConnectOnBoot(): Boolean = autoConnectOnBootFlow.first()
+
+    suspend fun setAutoConnectOnBoot(enabled: Boolean) {
+        context.settingsDataStore.edit { it[AUTO_CONNECT_ON_BOOT] = enabled }
+    }
+
     /**
      * Возвращает актуальный режим с учётом AUTO-режима.
      * В AUTO-режиме: днём (6:00-20:00) используем WHITE_ONLY, ночью BLACK_ONLY.
@@ -80,7 +94,7 @@ class SettingsStore(private val context: Context) {
     suspend fun getEffectiveSourceMode(): SourceMode {
         val mode = getSourceMode()
         if (mode != SourceMode.AUTO) return mode
-        
+
         val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
         return if (hour in 6..19) {
             SourceMode.WHITE_ONLY

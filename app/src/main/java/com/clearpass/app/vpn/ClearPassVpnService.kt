@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -33,6 +35,9 @@ class ClearPassVpnService : VpnService() {
     private var userStop = false
     private var socksUser: String = ""
     private var socksPass: String = ""
+    private var currentHost: String? = null
+    private var currentPort: Int = 0
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     companion object {
         const val ACTION_CONNECT = "com.clearpass.CONNECT"
@@ -42,6 +47,8 @@ class ClearPassVpnService : VpnService() {
         const val ACTION_CORE_DIED = "com.clearpass.CORE_DIED"
         const val EXTRA_SOCKS_USER = "socks_user"
         const val EXTRA_SOCKS_PASS = "socks_pass"
+        const val EXTRA_HOST = "proxy_host"
+        const val EXTRA_PORT = "proxy_port"
         private const val NOTIF_ID = 42
         private const val CHANNEL = "clearpass_vpn"
     }
@@ -53,6 +60,8 @@ class ClearPassVpnService : VpnService() {
                 killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true)
                 socksUser = intent.getStringExtra(EXTRA_SOCKS_USER) ?: ""
                 socksPass = intent.getStringExtra(EXTRA_SOCKS_PASS) ?: ""
+                currentHost = intent.getStringExtra(EXTRA_HOST)
+                currentPort = intent.getIntExtra(EXTRA_PORT, 0)
                 val config = intent.getStringExtra(EXTRA_CONFIG)
                 startForeground(NOTIF_ID, notification("Connecting…"))
                 scope.launch { startTunnel(config) }
@@ -130,6 +139,10 @@ class ClearPassVpnService : VpnService() {
             LogCollector.i("VPN", "sing-box process started")
             updateNotif("Connected")
 
+            // Следим за сменой сети (Wi-Fi ↔ LTE): проверяем сервер и при
+            // недоступности отправляем CORE_DIED — ConnectionManager ротирует
+            watchNetwork()
+
             scope.launch {
                 delay(1200)
                 if (userStop) return@launch
@@ -150,6 +163,54 @@ class ClearPassVpnService : VpnService() {
             updateNotif("Error: ${e.message?.take(40)}")
             if (!killSwitch) stopSelf()
         }
+    }
+
+    /**
+     * Регистрирует NetworkCallback: при появлении новой сети (переключение
+     * Wi-Fi ↔ LTE) даём интерфейсу подняться и проверяем доступность сервера.
+     * Если сервер недоступен — шлём ACTION_CORE_DIED для ротации конфига.
+     */
+    private fun watchNetwork() {
+        if (networkCallback != null) return
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    LogCollector.i("VPN", "Network available — check server")
+                    scope.launch {
+                        delay(4000) // даём новому интерфейсу подняться
+                        val host = currentHost ?: return@launch
+                        val port = currentPort
+                        if (port <= 0 || userStop) return@launch
+                        val ok = HealthMonitor.isServerReachable(host, port)
+                        if (!ok) {
+                            LogCollector.w("VPN", "Server unreachable after network change")
+                            updateNotif("Rotating after network change…")
+                            try {
+                                sendBroadcast(Intent(ACTION_CORE_DIED).setPackage(packageName))
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+            LogCollector.i("VPN", "Network watcher registered")
+        } catch (e: Exception) {
+            LogCollector.w("VPN", "netwatch: ${e.message}")
+        }
+    }
+
+    private fun stopNetworkWatch() {
+        try {
+            networkCallback?.let {
+                getSystemService(ConnectivityManager::class.java)
+                    ?.unregisterNetworkCallback(it)
+            }
+        } catch (_: Exception) {
+        }
+        networkCallback = null
     }
 
     private suspend fun watchCore() {
@@ -179,6 +240,7 @@ class ClearPassVpnService : VpnService() {
 
     private fun stopTunnel(graceful: Boolean) {
         try {
+            stopNetworkWatch()
             Tun2SocksBridge.stop()
             coreProcess?.destroy()
             coreProcess = null
@@ -219,6 +281,7 @@ class ClearPassVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopNetworkWatch()
         stopTunnel(userStop)
         scope.cancel()
         super.onDestroy()

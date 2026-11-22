@@ -1,9 +1,12 @@
 package com.clearpass.app.vpn
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.VpnService
+import androidx.core.content.ContextCompat
 import com.clearpass.app.converter.SingBoxConverter
 import com.clearpass.app.core.CoreBootstrap
 import com.clearpass.app.data.CachedConfig
@@ -50,6 +53,12 @@ class ConnectionManager(private val context: Context) {
     private var currentUri: String? = null
     private var healthJob: Job? = null
     private val rotating = AtomicBoolean(false)
+
+    init {
+        // Держим актуальный экземпляр для CORE_DIED-ротации из сервиса
+        activeInstance = this
+        registerCoreDiedReceiver()
+    }
 
     fun connect(prepareLauncher: ((Intent) -> Unit)? = null) {
         scope.launch {
@@ -156,6 +165,9 @@ class ConnectionManager(private val context: Context) {
             putExtra(ClearPassVpnService.EXTRA_KILL_SWITCH, settings.isKillSwitch())
             putExtra(ClearPassVpnService.EXTRA_SOCKS_USER, auth.username)
             putExtra(ClearPassVpnService.EXTRA_SOCKS_PASS, auth.password)
+            // Хост/порт для health-check при смене сети
+            putExtra(ClearPassVpnService.EXTRA_HOST, best.address)
+            putExtra(ClearPassVpnService.EXTRA_PORT, best.port)
         }
         try {
             if (android.os.Build.VERSION.SDK_INT >= 26) {
@@ -273,4 +285,35 @@ class ConnectionManager(private val context: Context) {
     private fun CachedConfig.toTested() = TestedLink(
         uri, address, port, sni, protocol, latencyMs, score
     )
+
+    /**
+     * Единожды регистрирует ресивер ACTION_CORE_DIED: сервис шлёт его при
+     * падении ядра и при недоступности сервера после смены сети — ротируем.
+     */
+    private fun registerCoreDiedReceiver() {
+        if (coreDiedRegistered) return
+        try {
+            val filter = IntentFilter(ClearPassVpnService.ACTION_CORE_DIED)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    if (intent?.action != ClearPassVpnService.ACTION_CORE_DIED) return
+                    LogCollector.w("CM", "CORE_DIED broadcast — rotate")
+                    val mgr = activeInstance ?: return
+                    mgr.scope.launch { mgr.rotate() }
+                }
+            }
+            ContextCompat.registerReceiver(
+                context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            coreDiedRegistered = true
+            LogCollector.i("CM", "CORE_DIED receiver registered")
+        } catch (e: Exception) {
+            LogCollector.w("CM", "receiver: ${e.message}")
+        }
+    }
+
+    companion object {
+        @Volatile private var activeInstance: ConnectionManager? = null
+        @Volatile private var coreDiedRegistered = false
+    }
 }
