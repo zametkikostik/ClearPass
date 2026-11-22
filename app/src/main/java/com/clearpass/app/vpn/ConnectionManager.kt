@@ -149,7 +149,7 @@ class ConnectionManager(private val context: Context) {
             return null
         }
 
-        val tested = ConfigTester.testLinks(all, maxToTest = 20)
+        val tested = ConfigTester.testLinks(all, maxToTest = 20, deepContext = context)
         cache.saveTested(tested)
         return tested.firstOrNull() ?: cached.firstOrNull()?.toTested()
     }
@@ -257,7 +257,7 @@ class ConnectionManager(private val context: Context) {
         if (!manualStore.add(toStore)) {
             return@withContext Result.failure(IllegalArgumentException("Не сохранено"))
         }
-        val tested = ConfigTester.testLinks(listOf(toStore), maxToTest = 1)
+        val tested = ConfigTester.testLinks(listOf(toStore), maxToTest = 1, deepContext = context)
         cache.saveTested(tested)
         UriCipher.encrypt(context, toStore)
         LogCollector.i("CM", "Manual saved: ${parsed.address}")
@@ -277,7 +277,7 @@ class ConnectionManager(private val context: Context) {
         val fromSubs = if (subs.isNotEmpty()) SubscriptionManager.fetchFromSubscriptions(subs) else emptyList()
         val fromOsint = OsintScraper.scrape()
         val all = (manual + fromSubs + fromOsint).distinct()
-        val tested = ConfigTester.testLinks(all, maxToTest = 25)
+        val tested = ConfigTester.testLinks(all, maxToTest = 25, deepContext = context)
         cache.saveTested(tested)
         tested.size
     }
