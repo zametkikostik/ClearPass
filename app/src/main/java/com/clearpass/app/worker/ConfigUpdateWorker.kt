@@ -98,8 +98,13 @@ class ConfigUpdateWorker(
                 return Result.success()
             }
 
-            // Тестируем больше конфигов для лучшего выбора
-            val tested = ConfigTester.testLinks(all, maxToTest = 50)
+            // Тестируем больше конфигов для лучшего выбора;
+            // топ ссылок дополнительно проходит real-delay проверку
+            val tested = ConfigTester.testLinks(
+                all,
+                maxToTest = 50,
+                deepContext = applicationContext
+            )
             ConfigCacheStore(applicationContext).saveTested(tested)
             LogCollector.i("Worker", "Alive cached: ${tested.size}")
             
