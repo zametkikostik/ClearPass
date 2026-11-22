@@ -25,6 +25,7 @@ import com.clearpass.app.tester.ConfigTester
 import com.clearpass.app.tester.TestedLink
 import com.clearpass.app.util.LogCollector
 import com.clearpass.app.whitelist.WhiteListManager
+import com.clearpass.app.worker.ConfigUpdateScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -86,8 +87,10 @@ class ConnectionManager(private val context: Context) {
 
                 val best = withContext(Dispatchers.IO) { resolveBest() }
                 if (best == null) {
+                    // Живых конфигов нет — срочно обновляем списки в фоне
+                    ConfigUpdateScheduler.refreshNow(context)
                     _state.value = ConnectionState.Error(
-                        "Нет рабочих конфигов. Добавьте VLESS или subscription."
+                        "Нет рабочих конфигов. Обновляем списки — попробуйте через минуту."
                     )
                     return@launch
                 }
@@ -230,7 +233,11 @@ class ConnectionManager(private val context: Context) {
                 cache.markFailed(c.uri)
             }
             if (!ok) {
-                _state.value = ConnectionState.Error("Ротация не удалась — нет живых серверов")
+                // Кэш исчерпан — срочно докачиваем свежие списки в фоне
+                ConfigUpdateScheduler.refreshNow(context)
+                _state.value = ConnectionState.Error(
+                    "Ротация не удалась — обновляем списки, попробуйте ещё раз"
+                )
             }
         } finally {
             rotating.set(false)
