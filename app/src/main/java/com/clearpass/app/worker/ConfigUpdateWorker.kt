@@ -24,6 +24,9 @@ class ConfigUpdateWorker(
 
     override suspend fun doWork(): Result {
         return try {
+            // ETag-кэш для списков — один раз подключаем хранилище
+            SourceFetcher.attach(applicationContext)
+
             val settingsStore = SettingsStore(applicationContext)
             // Используем эффективный режим с учётом AUTO
             val mode = settingsStore.getEffectiveSourceMode()
@@ -105,8 +108,16 @@ class ConfigUpdateWorker(
                 maxToTest = 50,
                 deepContext = applicationContext
             )
-            ConfigCacheStore(applicationContext).saveTested(tested)
-            LogCollector.i("Worker", "Alive cached: ${tested.size}")
+            val cacheStore = ConfigCacheStore(applicationContext)
+            cacheStore.saveTested(tested)
+            cacheStore.pruneStale()
+
+            val cached = cacheStore.getAll()
+            val fresh = cached.count { !ConfigCacheStore.isStale(it) }
+            LogCollector.i(
+                "Worker",
+                "Cache: ${cached.size} total, $fresh fresh, tested ${tested.size}"
+            )
             
             if (tested.isNotEmpty()) {
                 val avgLatency = tested.map { it.latencyMs }.average().toInt()

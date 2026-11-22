@@ -32,6 +32,15 @@ class ConfigCacheStore(private val context: Context) {
     private val KEY = stringPreferencesKey("items")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+    companion object {
+        private const val STALE_MS = 12 * 60 * 60 * 1000L   // 12 ч — конфиг несвежий
+        private const val PRUNE_MS = 24 * 60 * 60 * 1000L   // 24 ч — выбрасываем совсем
+
+        /** Свежесть кэша: тестировали за последние 12 часов? */
+        fun isStale(c: CachedConfig, now: Long = System.currentTimeMillis()): Boolean =
+            now - c.lastTested > STALE_MS
+    }
+
     suspend fun getAll(): List<CachedConfig> {
         return try {
             val raw = context.configCacheStore.data.first()[KEY] ?: return emptyList()
@@ -42,9 +51,18 @@ class ConfigCacheStore(private val context: Context) {
         }
     }
 
+    /**
+     * Топ конфигов: сначала с высоким скором, при равенстве — свежие
+     * приоритетнее просроченных, дальше — по задержке.
+     */
     suspend fun getTop(limit: Int = 15): List<CachedConfig> {
+        val now = System.currentTimeMillis()
         return getAll()
-            .sortedWith(compareByDescending<CachedConfig> { it.score }.thenBy { it.latencyMs })
+            .sortedWith(
+                compareByDescending<CachedConfig> { it.score }
+                    .thenByDescending { !isStale(it, now) }
+                    .thenBy { it.latencyMs }
+            )
             .take(limit)
     }
 
@@ -105,6 +123,26 @@ class ConfigCacheStore(private val context: Context) {
                 persist(all)
             }
         } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Чистит совсем устаревшие записи (>24 ч с последнего теста), чтобы
+     * кэш не зарастал мёртвыми конфигами. Возвращает число удалённых.
+     */
+    suspend fun pruneStale(): Int {
+        return try {
+            val all = getAll()
+            val now = System.currentTimeMillis()
+            val keep = all.filter { now - it.lastTested <= PRUNE_MS }
+            val removed = all.size - keep.size
+            if (removed > 0) {
+                persist(keep)
+                LogCollector.i("Cache", "Pruned $removed stale (${keep.size} kept)")
+            }
+            removed
+        } catch (_: Exception) {
+            0
         }
     }
 
