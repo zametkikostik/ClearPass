@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,6 +32,7 @@ import com.clearpass.app.stats.SessionStats
 import com.clearpass.app.tunnel.HevJni
 import com.clearpass.app.tunnel.Tun2SocksBridge
 import com.clearpass.app.ui.theme.*
+import com.clearpass.app.updater.SelfUpdater
 import com.clearpass.app.util.LogCollector
 import com.clearpass.app.util.LogEntry
 import com.clearpass.app.util.LogLevel
@@ -424,6 +426,80 @@ private fun SettingsScreen(
         Spacer(Modifier.height(16.dp))
         Button(onClick = onRefreshSources, modifier = Modifier.fillMaxWidth()) {
             Text("Обновить источники сейчас")
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Text("Обновление приложения", color = NeonYellow, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        UpdateSection()
+    }
+}
+
+/**
+ * Проверка и установка обновления из GitHub Releases.
+ * Проверка запускается при входе в настройки, установка — по кнопке.
+ */
+@Composable
+private fun UpdateSection() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var info by remember { mutableStateOf<SelfUpdater.UpdateInfo?>(null) }
+    var status by remember { mutableStateOf("checking") } // checking | none | ready | downloading | error
+    var progress by remember { mutableStateOf(0) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val currentVersion = remember { SelfUpdater.currentVersion(ctx) }
+
+    fun recheck() {
+        status = "checking"
+        scope.launch {
+            info = SelfUpdater.checkForUpdate(ctx)
+            status = if (info == null) "none" else "ready"
+        }
+    }
+
+    LaunchedEffect(Unit) { recheck() }
+
+    when (status) {
+        "checking" -> {
+            Text("Проверяем обновления…", color = TextMuted, fontSize = 12.sp)
+        }
+        "none" -> {
+            Text("Установлена последняя версия ($currentVersion)", color = TextMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { recheck() }) { Text("Проверить снова") }
+        }
+        "ready" -> {
+            info?.let { i ->
+                Text("Доступна версия ${i.version} (сейчас $currentVersion)", color = NeonGreen, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        status = "downloading"
+                        progress = 0
+                        scope.launch {
+                            val ok = SelfUpdater.downloadAndInstall(ctx, i) { pct -> progress = pct }
+                            if (!ok) {
+                                status = "error"
+                                error = "Не удалось скачать APK — подробности в логах"
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Скачать и установить") }
+                Text(
+                    "Размер: ${"%.1f".format(i.sizeBytes / 1024.0 / 1024.0)} МБ",
+                    color = TextMuted,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        "downloading" -> {
+            Text("Скачиваем APK… $progress%", color = NeonCyan, fontSize = 12.sp)
+        }
+        "error" -> {
+            Text(error ?: "Ошибка обновления", color = ErrorRed, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { recheck() }) { Text("Повторить") }
         }
     }
 }
