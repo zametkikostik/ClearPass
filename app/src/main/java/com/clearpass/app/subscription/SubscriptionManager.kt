@@ -41,7 +41,7 @@ object SubscriptionManager {
         }
 
     private fun download(url: String): String? {
-        val req = Request.Builder().url(url).header("User-Agent", "ClearPass/0.2").build()
+        val req = Request.Builder().url(url).header("User-Agent", "ClearPass/0.3").build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
             return resp.body?.string()
