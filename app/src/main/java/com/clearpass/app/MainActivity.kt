@@ -60,6 +60,7 @@ class MainActivity : ComponentActivity() {
                 val session by SessionStats.session.collectAsState()
                 val settingsStore = remember { SettingsStore(applicationContext) }
                 val killSwitch by settingsStore.killSwitchFlow.collectAsState(initial = true)
+                val autoConnect by settingsStore.autoConnectOnBootFlow.collectAsState(initial = false)
                 val sourceMode by settingsStore.sourceModeFlow.collectAsState(initial = SourceMode.BOTH)
                 var screen by remember { mutableStateOf("main") }
                 val scope = rememberCoroutineScope()
@@ -88,6 +89,8 @@ class MainActivity : ComponentActivity() {
                         "settings" -> SettingsScreen(
                             killSwitch = killSwitch,
                             sourceMode = sourceMode,
+                            autoConnect = autoConnect,
+                            onAutoConnect = { v -> scope.launch { settingsStore.setAutoConnectOnBoot(v) } },
                             onKillSwitch = { v -> scope.launch { settingsStore.setKillSwitch(v) } },
                             onSourceMode = { m -> scope.launch { settingsStore.setSourceMode(m) } },
                             onRefreshSources = {
@@ -362,6 +365,8 @@ private fun LogsContent(logs: List<LogEntry>, onBack: () -> Unit) {
 private fun SettingsScreen(
     killSwitch: Boolean,
     sourceMode: SourceMode,
+    autoConnect: Boolean,
+    onAutoConnect: (Boolean) -> Unit,
     onKillSwitch: (Boolean) -> Unit,
     onSourceMode: (SourceMode) -> Unit,
     onRefreshSources: () -> Unit,
@@ -401,6 +406,19 @@ private fun SettingsScreen(
                 Text("Держать TUN при падении ядра", color = TextMuted, fontSize = 12.sp)
             }
             Switch(checked = killSwitch, onCheckedChange = onKillSwitch)
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Автоподключение", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("Поднимать VPN после загрузки телефона", color = TextMuted, fontSize = 12.sp)
+            }
+            Switch(checked = autoConnect, onCheckedChange = onAutoConnect)
         }
 
         Spacer(Modifier.height(16.dp))
