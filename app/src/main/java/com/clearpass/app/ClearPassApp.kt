@@ -17,7 +17,7 @@ class ClearPassApp : Application() {
     override fun onCreate() {
         super.onCreate()
         try {
-            LogCollector.i("App", "ClearPass 0.2.0 starting")
+            LogCollector.i("App", "ClearPass 0.3.0 starting")
             CoreBootstrap.prepare(this)
             CoreBootstrap.logCoreStatus(this)
             ConfigUpdateScheduler.schedule(this, 3)

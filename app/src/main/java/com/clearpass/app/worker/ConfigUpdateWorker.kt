@@ -16,6 +16,7 @@ import com.clearpass.app.tester.ConfigTester
 import com.clearpass.app.util.LogCollector
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class ConfigUpdateWorker(
     context: Context,
@@ -24,6 +25,9 @@ class ConfigUpdateWorker(
 
     override suspend fun doWork(): Result {
         return try {
+            // ETag-кэш для списков — один раз подключаем хранилище
+            SourceFetcher.attach(applicationContext)
+
             val settingsStore = SettingsStore(applicationContext)
             // Используем эффективный режим с учётом AUTO
             val mode = settingsStore.getEffectiveSourceMode()
@@ -35,55 +39,57 @@ class ConfigUpdateWorker(
                 SubscriptionManager.fetchFromSubscriptions(subUrls)
             } else emptyList()
 
-            // Загружаем из нескольких источников параллельно для надёжности
-            val curatedJobs = when (mode) {
-                SourceMode.WHITE_ONLY -> {
-                    listOf(
-                        async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
-                        async { 
-                            SafeSources.byMode(SafeSources.Mode.WHITE_LIST_BYPASS)
-                                .take(3)
-                                .flatMap { SourceFetcher.fetchSource(it) }
-                        }
-                    )
+            // Загружаем из нескольких источников параллельно для надёжности.
+            // CoroutineWorker — не CoroutineScope, поэтому async-ам нужна
+            // явная обёртка coroutineScope {}
+            val curated = coroutineScope {
+                val curatedJobs = when (mode) {
+                    SourceMode.WHITE_ONLY -> {
+                        listOf(
+                            async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
+                            async {
+                                SafeSources.byMode(SafeSources.Mode.WHITE_LIST_BYPASS)
+                                    .take(3)
+                                    .flatMap { SourceFetcher.fetchSource(it) }
+                            }
+                        )
+                    }
+                    SourceMode.BLACK_ONLY -> {
+                        listOf(
+                            async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) },
+                            async {
+                                SafeSources.byMode(SafeSources.Mode.BLACK_LIST_MOBILE)
+                                    .take(3)
+                                    .flatMap { SourceFetcher.fetchSource(it) }
+                            }
+                        )
+                    }
+                    SourceMode.BOTH -> {
+                        listOf(
+                            async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
+                            async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) },
+                            async {
+                                SafeSources.backups(SafeSources.Mode.WHITE_LIST_BYPASS)
+                                    .take(2)
+                                    .flatMap { SourceFetcher.fetchSource(it) }
+                            },
+                            async {
+                                SafeSources.backups(SafeSources.Mode.BLACK_LIST_MOBILE)
+                                    .take(2)
+                                    .flatMap { SourceFetcher.fetchSource(it) }
+                            }
+                        )
+                    }
+                    SourceMode.AUTO -> {
+                        // В AUTO-режиме загружаем оба типа, но приоритет зависит от времени суток
+                        listOf(
+                            async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
+                            async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) }
+                        )
+                    }
                 }
-                SourceMode.BLACK_ONLY -> {
-                    listOf(
-                        async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) },
-                        async {
-                            SafeSources.byMode(SafeSources.Mode.BLACK_LIST_MOBILE)
-                                .take(3)
-                                .flatMap { SourceFetcher.fetchSource(it) }
-                        }
-                    )
-                }
-                SourceMode.BOTH -> {
-                    listOf(
-                        async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
-                        async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) },
-                        async {
-                            SafeSources.backups(SafeSources.Mode.WHITE_LIST_BYPASS)
-                                .take(2)
-                                .flatMap { SourceFetcher.fetchSource(it) }
-                        },
-                        async {
-                            SafeSources.backups(SafeSources.Mode.BLACK_LIST_MOBILE)
-                                .take(2)
-                                .flatMap { SourceFetcher.fetchSource(it) }
-                        }
-                    )
-                }
-                SourceMode.AUTO -> {
-                    // В AUTO-режиме загружаем оба типа, но приоритет зависит от времени суток
-                    listOf(
-                        async { SourceFetcher.fetchSource(SafeSources.defaultForRfWhiteList()) },
-                        async { SourceFetcher.fetchSource(SafeSources.defaultBlackMobile()) }
-                    )
-                }
+                curatedJobs.awaitAll().flatten().distinct()
             }
-
-            val curatedResults = curatedJobs.awaitAll()
-            val curated = curatedResults.flatten().distinct()
             LogCollector.i("Worker", "Curated sources: ${curated.size} links")
 
             val preferWhite = mode != SourceMode.BLACK_ONLY
@@ -98,17 +104,30 @@ class ConfigUpdateWorker(
                 return Result.success()
             }
 
-            // Тестируем больше конфигов для лучшего выбора
-            val tested = ConfigTester.testLinks(all, maxToTest = 50)
-            ConfigCacheStore(applicationContext).saveTested(tested)
-            LogCollector.i("Worker", "Alive cached: ${tested.size}")
-            
+            // Тестируем больше конфигов для лучшего выбора;
+            // топ ссылок дополнительно проходит real-delay проверку
+            val tested = ConfigTester.testLinks(
+                all,
+                maxToTest = 50,
+                deepContext = applicationContext
+            )
+            val cacheStore = ConfigCacheStore(applicationContext)
+            cacheStore.saveTested(tested)
+            cacheStore.pruneStale()
+
+            val cached = cacheStore.getAll()
+            val fresh = cached.count { !ConfigCacheStore.isStale(it) }
+            LogCollector.i(
+                "Worker",
+                "Cache: ${cached.size} total, $fresh fresh, tested ${tested.size}"
+            )
+
             if (tested.isNotEmpty()) {
                 val avgLatency = tested.map { it.latencyMs }.average().toInt()
                 val minLatency = tested.minOf { it.latencyMs }
                 LogCollector.i("Worker", "Latency: avg=$avgLatency ms, min=$minLatency ms")
             }
-            
+
             Result.success()
         } catch (e: Exception) {
             LogCollector.e("Worker", e.message ?: "fail")

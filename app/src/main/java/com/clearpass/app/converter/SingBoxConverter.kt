@@ -28,14 +28,58 @@ object SingBoxConverter {
         config.put("route", buildRoute())
         config.put(
             "experimental",
-            JSONObject().put(
-                "clash_api",
-                JSONObject()
-                    .put("external_controller", "127.0.0.1:9090")
-                    .put("secret", localAuth.password)
-            )
+            JSONObject()
+                .put(
+                    "clash_api",
+                    JSONObject()
+                        .put("external_controller", "127.0.0.1:9090")
+                        .put("secret", localAuth.password)
+                )
         )
         return config.toString(2)
+    }
+
+    /**
+     * Конфиг для real-delay теста: тот же outbound, но локальный SOCKS на
+     * случайном порту, без clash_api (чтобы не конфликтовать с боевым
+     * экземпляром) и без whitelist-исключений — весь трафик через прокси.
+     */
+    fun convertForTest(link: ProxyLink, localAuth: LocalAuth, listenPort: Int): String {
+        require(localAuth.username.isNotBlank() && localAuth.password.length >= 12) {
+            "Local inbound MUST have strong authentication"
+        }
+
+        val config = JSONObject()
+        config.put("log", JSONObject().put("level", "error"))
+        config.put("dns", buildDns())
+        config.put(
+            "inbounds",
+            JSONArray()
+                .put(
+                    JSONObject()
+                        .put("type", "mixed")
+                        .put("tag", "mixed-in")
+                        .put("listen", "127.0.0.1")
+                        .put("listen_port", listenPort)
+                        .put(
+                            "users",
+                            JSONArray()
+                                .put(
+                                    JSONObject()
+                                        .put("username", localAuth.username)
+                                        .put("password", localAuth.password)
+                                )
+                        )
+                )
+        )
+        config.put("outbounds", buildOutbounds(link))
+        config.put(
+            "route",
+            JSONObject()
+                .put("final", "proxy")
+                .put("auto_detect_interface", true)
+        )
+        return config.toString()
     }
 
     fun generateLocalAuth(): LocalAuth {

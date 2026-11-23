@@ -1,9 +1,12 @@
 package com.clearpass.app.vpn
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.VpnService
+import androidx.core.content.ContextCompat
 import com.clearpass.app.converter.SingBoxConverter
 import com.clearpass.app.core.CoreBootstrap
 import com.clearpass.app.data.CachedConfig
@@ -22,6 +25,7 @@ import com.clearpass.app.tester.ConfigTester
 import com.clearpass.app.tester.TestedLink
 import com.clearpass.app.util.LogCollector
 import com.clearpass.app.whitelist.WhiteListManager
+import com.clearpass.app.worker.ConfigUpdateScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,6 +55,12 @@ class ConnectionManager(private val context: Context) {
     private var healthJob: Job? = null
     private val rotating = AtomicBoolean(false)
 
+    init {
+        // Держим актуальный экземпляр для CORE_DIED-ротации из сервиса
+        activeInstance = this
+        registerCoreDiedReceiver()
+    }
+
     fun connect(prepareLauncher: ((Intent) -> Unit)? = null) {
         scope.launch {
             try {
@@ -77,8 +87,10 @@ class ConnectionManager(private val context: Context) {
 
                 val best = withContext(Dispatchers.IO) { resolveBest() }
                 if (best == null) {
+                    // Живых конфигов нет — срочно обновляем списки в фоне
+                    ConfigUpdateScheduler.refreshNow(context)
                     _state.value = ConnectionState.Error(
-                        "Нет рабочих конфигов. Добавьте VLESS или subscription."
+                        "Нет рабочих конфигов. Обновляем списки — попробуйте через минуту."
                     )
                     return@launch
                 }
@@ -140,7 +152,7 @@ class ConnectionManager(private val context: Context) {
             return null
         }
 
-        val tested = ConfigTester.testLinks(all, maxToTest = 20)
+        val tested = ConfigTester.testLinks(all, maxToTest = 20, deepContext = context)
         cache.saveTested(tested)
         return tested.firstOrNull() ?: cached.firstOrNull()?.toTested()
     }
@@ -156,6 +168,9 @@ class ConnectionManager(private val context: Context) {
             putExtra(ClearPassVpnService.EXTRA_KILL_SWITCH, settings.isKillSwitch())
             putExtra(ClearPassVpnService.EXTRA_SOCKS_USER, auth.username)
             putExtra(ClearPassVpnService.EXTRA_SOCKS_PASS, auth.password)
+            // Хост/порт для health-check при смене сети
+            putExtra(ClearPassVpnService.EXTRA_HOST, best.address)
+            putExtra(ClearPassVpnService.EXTRA_PORT, best.port)
         }
         try {
             if (android.os.Build.VERSION.SDK_INT >= 26) {
@@ -218,7 +233,11 @@ class ConnectionManager(private val context: Context) {
                 cache.markFailed(c.uri)
             }
             if (!ok) {
-                _state.value = ConnectionState.Error("Ротация не удалась — нет живых серверов")
+                // Кэш исчерпан — срочно докачиваем свежие списки в фоне
+                ConfigUpdateScheduler.refreshNow(context)
+                _state.value = ConnectionState.Error(
+                    "Ротация не удалась — обновляем списки, попробуйте ещё раз"
+                )
             }
         } finally {
             rotating.set(false)
@@ -245,7 +264,7 @@ class ConnectionManager(private val context: Context) {
         if (!manualStore.add(toStore)) {
             return@withContext Result.failure(IllegalArgumentException("Не сохранено"))
         }
-        val tested = ConfigTester.testLinks(listOf(toStore), maxToTest = 1)
+        val tested = ConfigTester.testLinks(listOf(toStore), maxToTest = 1, deepContext = context)
         cache.saveTested(tested)
         UriCipher.encrypt(context, toStore)
         LogCollector.i("CM", "Manual saved: ${parsed.address}")
@@ -265,7 +284,7 @@ class ConnectionManager(private val context: Context) {
         val fromSubs = if (subs.isNotEmpty()) SubscriptionManager.fetchFromSubscriptions(subs) else emptyList()
         val fromOsint = OsintScraper.scrape()
         val all = (manual + fromSubs + fromOsint).distinct()
-        val tested = ConfigTester.testLinks(all, maxToTest = 25)
+        val tested = ConfigTester.testLinks(all, maxToTest = 25, deepContext = context)
         cache.saveTested(tested)
         tested.size
     }
@@ -273,4 +292,35 @@ class ConnectionManager(private val context: Context) {
     private fun CachedConfig.toTested() = TestedLink(
         uri, address, port, sni, protocol, latencyMs, score
     )
+
+    /**
+     * Единожды регистрирует ресивер ACTION_CORE_DIED: сервис шлёт его при
+     * падении ядра и при недоступности сервера после смены сети — ротируем.
+     */
+    private fun registerCoreDiedReceiver() {
+        if (coreDiedRegistered) return
+        try {
+            val filter = IntentFilter(ClearPassVpnService.ACTION_CORE_DIED)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    if (intent?.action != ClearPassVpnService.ACTION_CORE_DIED) return
+                    LogCollector.w("CM", "CORE_DIED broadcast — rotate")
+                    val mgr = activeInstance ?: return
+                    mgr.scope.launch { mgr.rotate() }
+                }
+            }
+            ContextCompat.registerReceiver(
+                context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            coreDiedRegistered = true
+            LogCollector.i("CM", "CORE_DIED receiver registered")
+        } catch (e: Exception) {
+            LogCollector.w("CM", "receiver: ${e.message}")
+        }
+    }
+
+    companion object {
+        @Volatile private var activeInstance: ConnectionManager? = null
+        @Volatile private var coreDiedRegistered = false
+    }
 }

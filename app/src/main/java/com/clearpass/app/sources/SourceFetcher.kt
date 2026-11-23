@@ -1,5 +1,7 @@
 package com.clearpass.app.sources
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.clearpass.app.util.LogCollector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -18,6 +20,18 @@ object SourceFetcher {
         .followRedirects(true)
         .retryOnConnectionFailure(true)
         .build()
+
+    // Кэш ETag по URL — неизменившиеся списки не перекачиваем (304)
+    @Volatile
+    private var etagPrefs: SharedPreferences? = null
+
+    /** Вызвать один раз (воркер) — подключает хранилище ETag. */
+    fun attach(context: Context) {
+        if (etagPrefs == null) {
+            etagPrefs = context.applicationContext
+                .getSharedPreferences("source_etags", Context.MODE_PRIVATE)
+        }
+    }
 
     private val LINK = Pattern.compile(
         """(vless|hysteria2|hy2|tuic|trojan|ss|vmess)://[^\s<>"']+""",
@@ -110,19 +124,40 @@ object SourceFetcher {
         found.toList()
     }
 
+    /**
+     * Скачивает список с поддержкой ETag: если сервер отдаёт 304 Not Modified,
+     * тело не перекачиваем. Новый ETag запоминаем на следующий цикл.
+     */
     private fun download(url: String): String? {
+        val etag = etagPrefs?.getString(url, null)
         val req = Request.Builder()
             .url(url)
-            .header("User-Agent", "ClearPass/0.2 (Android VPN Client)")
+            .header("User-Agent", "ClearPass/0.3 (Android VPN Client)")
             .header("Accept", "*/*")
             .header("Cache-Control", "no-cache")
+            .apply { if (etag != null) header("If-None-Match", etag) }
             .build()
         client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                LogCollector.w("Source", "HTTP ${resp.code} for $url")
-                return null
+            return when {
+                resp.code == 304 -> {
+                    // Список не менялся с прошлой загрузки — экономим трафик
+                    LogCollector.i("Source", "304 Not Modified $url")
+                    null
+                }
+                !resp.isSuccessful -> {
+                    LogCollector.w("Source", "HTTP ${resp.code} for $url")
+                    null
+                }
+                else -> {
+                    resp.header("ETag")?.let { newEtag ->
+                        try {
+                            etagPrefs?.edit()?.putString(url, newEtag)?.apply()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    resp.body?.string()
+                }
             }
-            return resp.body?.string()
         }
     }
 

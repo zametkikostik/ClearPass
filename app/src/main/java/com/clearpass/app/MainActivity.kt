@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -26,11 +27,13 @@ import androidx.compose.ui.unit.sp
 import com.clearpass.app.core.CoreBootstrap
 import com.clearpass.app.data.SettingsStore
 import com.clearpass.app.data.SourceMode
+import com.clearpass.app.data.SplitTunnelMode
 import com.clearpass.app.sources.SafeSources
 import com.clearpass.app.stats.SessionStats
 import com.clearpass.app.tunnel.HevJni
 import com.clearpass.app.tunnel.Tun2SocksBridge
 import com.clearpass.app.ui.theme.*
+import com.clearpass.app.updater.SelfUpdater
 import com.clearpass.app.util.LogCollector
 import com.clearpass.app.util.LogEntry
 import com.clearpass.app.util.LogLevel
@@ -38,6 +41,15 @@ import com.clearpass.app.vpn.ConnectionManager
 import com.clearpass.app.vpn.ConnectionState
 import com.clearpass.app.worker.ConfigUpdateScheduler
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+private data class AppEntry(val pkg: String, val label: String)
+
+private fun splitModeLabel(mode: SplitTunnelMode): String = when (mode) {
+    SplitTunnelMode.ALL -> "Весь трафик через VPN"
+    SplitTunnelMode.INCLUDE -> "Только выбранные приложения"
+    SplitTunnelMode.EXCLUDE -> "Кроме выбранных приложений"
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -60,7 +72,10 @@ class MainActivity : ComponentActivity() {
                 val session by SessionStats.session.collectAsState()
                 val settingsStore = remember { SettingsStore(applicationContext) }
                 val killSwitch by settingsStore.killSwitchFlow.collectAsState(initial = true)
+                val autoConnect by settingsStore.autoConnectOnBootFlow.collectAsState(initial = false)
                 val sourceMode by settingsStore.sourceModeFlow.collectAsState(initial = SourceMode.BOTH)
+                val splitMode by settingsStore.splitModeFlow.collectAsState(initial = SplitTunnelMode.ALL)
+                val splitPackages by settingsStore.splitPackagesFlow.collectAsState(initial = emptySet())
                 var screen by remember { mutableStateOf("main") }
                 val scope = rememberCoroutineScope()
                 val bridgeMode = Tun2SocksBridge.currentMode()
@@ -85,11 +100,27 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         )
+                        "split" -> SplitTunnelScreen(
+                            initialMode = splitMode,
+                            initialSelected = splitPackages,
+                            onSave = { mode, pkgs ->
+                                scope.launch {
+                                    settingsStore.setSplitMode(mode)
+                                    settingsStore.setSplitPackages(pkgs)
+                                    LogCollector.i("UI", "Split saved: $mode, ${pkgs.size} apps")
+                                }
+                            },
+                            onBack = { screen = "settings" }
+                        )
                         "settings" -> SettingsScreen(
                             killSwitch = killSwitch,
                             sourceMode = sourceMode,
+                            autoConnect = autoConnect,
+                            splitMode = splitMode,
+                            onAutoConnect = { v -> scope.launch { settingsStore.setAutoConnectOnBoot(v) } },
                             onKillSwitch = { v -> scope.launch { settingsStore.setKillSwitch(v) } },
                             onSourceMode = { m -> scope.launch { settingsStore.setSourceMode(m) } },
+                            onOpenSplit = { screen = "split" },
                             onRefreshSources = {
                                 ConfigUpdateScheduler.refreshNow(applicationContext)
                                 LogCollector.i("UI", "Refresh sources requested")
@@ -116,7 +147,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        LogCollector.i("Main", "UI ready v0.2.0")
+        LogCollector.i("Main", "UI ready v0.3.0")
     }
 }
 
@@ -292,6 +323,103 @@ private fun AddConfigScreen(
     }
 }
 
+/**
+ * Экран split tunneling: выбор режима и приложений (только запускаемые,
+ * без системного мусора). Список грузится в фоне, сохранение — по кнопке.
+ */
+@Composable
+private fun SplitTunnelScreen(
+    initialMode: SplitTunnelMode,
+    initialSelected: Set<String>,
+    onSave: (SplitTunnelMode, Set<String>) -> Unit,
+    onBack: () -> Unit
+) {
+    val ctx = LocalContext.current
+    var mode by remember { mutableStateOf(initialMode) }
+    val selected = remember { mutableStateMapOf<String, Boolean>() }
+    initialSelected.forEach { selected[it] = true }
+
+    var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        apps = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val pm = ctx.packageManager
+                pm.getInstalledApplications(0)
+                    .filter { it.enabled && pm.getLaunchIntentForPackage(it.packageName) != null }
+                    .map { AppEntry(it.packageName, it.loadLabel(pm).toString()) }
+                    .distinctBy { it.pkg }
+                    .sortedBy { it.label.lowercase() }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        TextButton(onClick = onBack) { Text("< Back", color = NeonCyan) }
+        Text("Split tunneling", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Spacer(Modifier.height(12.dp))
+
+        listOf(
+            SplitTunnelMode.ALL to "Весь трафик через VPN",
+            SplitTunnelMode.INCLUDE to "Только выбранные",
+            SplitTunnelMode.EXCLUDE to "Кроме выбранных"
+        ).forEach { (m, label) ->
+            val sel = mode == m
+            OutlinedButton(
+                onClick = { mode = m },
+                modifier = Modifier.fillMaxWidth(),
+                border = BorderStroke(1.dp, if (sel) NeonGreen else Color(0xFF333333))
+            ) {
+                Text(label, color = if (sel) NeonGreen else TextPrimary)
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+
+        Text("Применяется при следующем подключении", color = TextMuted, fontSize = 11.sp)
+
+        if (mode != SplitTunnelMode.ALL) {
+            Spacer(Modifier.height(12.dp))
+            Text("Выбрано: ${selected.count { it.value }}", color = NeonCyan, fontSize = 12.sp)
+            Spacer(Modifier.height(8.dp))
+            if (apps.isEmpty()) {
+                Text("Загружаем список приложений…", color = TextMuted, fontSize = 12.sp)
+            }
+            LazyColumn(Modifier.weight(1f)) {
+                items(apps, key = { it.pkg }) { app ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            app.label,
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Checkbox(
+                            checked = selected[app.pkg] == true,
+                            onCheckedChange = { checked -> selected[app.pkg] = checked }
+                        )
+                    }
+                }
+            }
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = {
+                onSave(mode, selected.filter { it.value }.keys)
+                onBack()
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Сохранить") }
+    }
+}
+
 @Composable
 private fun StatusBadge(state: ConnectionState) {
     val (label, color) = when (state) {
@@ -362,8 +490,12 @@ private fun LogsContent(logs: List<LogEntry>, onBack: () -> Unit) {
 private fun SettingsScreen(
     killSwitch: Boolean,
     sourceMode: SourceMode,
+    autoConnect: Boolean,
+    splitMode: SplitTunnelMode,
+    onAutoConnect: (Boolean) -> Unit,
     onKillSwitch: (Boolean) -> Unit,
     onSourceMode: (SourceMode) -> Unit,
+    onOpenSplit: () -> Unit,
     onRefreshSources: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -403,9 +535,109 @@ private fun SettingsScreen(
             Switch(checked = killSwitch, onCheckedChange = onKillSwitch)
         }
 
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Автоподключение", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("Поднимать VPN после загрузки телефона", color = TextMuted, fontSize = 12.sp)
+            }
+            Switch(checked = autoConnect, onCheckedChange = onAutoConnect)
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Split tunneling", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text(splitModeLabel(splitMode), color = TextMuted, fontSize = 12.sp)
+            }
+            TextButton(onClick = onOpenSplit) { Text("Изменить", color = NeonCyan) }
+        }
+
         Spacer(Modifier.height(16.dp))
         Button(onClick = onRefreshSources, modifier = Modifier.fillMaxWidth()) {
             Text("Обновить источники сейчас")
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Text("Обновление приложения", color = NeonYellow, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        UpdateSection()
+    }
+}
+
+/**
+ * Проверка и установка обновления из GitHub Releases.
+ * Проверка запускается при входе в настройки, установка — по кнопке.
+ */
+@Composable
+private fun UpdateSection() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var info by remember { mutableStateOf<SelfUpdater.UpdateInfo?>(null) }
+    var status by remember { mutableStateOf("checking") } // checking | none | ready | downloading | error
+    var progress by remember { mutableStateOf(0) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val currentVersion = remember { SelfUpdater.currentVersion(ctx) }
+
+    fun recheck() {
+        status = "checking"
+        scope.launch {
+            info = SelfUpdater.checkForUpdate(ctx)
+            status = if (info == null) "none" else "ready"
+        }
+    }
+
+    LaunchedEffect(Unit) { recheck() }
+
+    when (status) {
+        "checking" -> {
+            Text("Проверяем обновления…", color = TextMuted, fontSize = 12.sp)
+        }
+        "none" -> {
+            Text("Установлена последняя версия ($currentVersion)", color = TextMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { recheck() }) { Text("Проверить снова") }
+        }
+        "ready" -> {
+            info?.let { i ->
+                Text("Доступна версия ${i.version} (сейчас $currentVersion)", color = NeonGreen, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        status = "downloading"
+                        progress = 0
+                        scope.launch {
+                            val ok = SelfUpdater.downloadAndInstall(ctx, i) { pct -> progress = pct }
+                            if (!ok) {
+                                status = "error"
+                                error = "Не удалось скачать APK — подробности в логах"
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Скачать и установить") }
+                Text(
+                    "Размер: ${"%.1f".format(i.sizeBytes / 1024.0 / 1024.0)} МБ",
+                    color = TextMuted,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        "downloading" -> {
+            Text("Скачиваем APK… $progress%", color = NeonCyan, fontSize = 12.sp)
+        }
+        "error" -> {
+            Text(error ?: "Ошибка обновления", color = ErrorRed, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { recheck() }) { Text("Повторить") }
         }
     }
 }
